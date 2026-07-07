@@ -58,7 +58,7 @@ The script will:
 
 *   **Auto-populate Cron:** Automatically checks, cleans, and adds its own execution entry (`0 4 * * * root ...`) to the system crontab (`/etc/crontab`). If the script path changes, running it manually updates the cron mapping automatically.
 *   **Auto discover** all your LAN interfaces (bridges and physical, excluding WAN structures like `wan`, `ppp`, `tun`, `wg`, `vpn`).
-*   **Auto detect** the precise subnets (CIDR) and add them to `ntpd-rs.toml` (e.g., `allow 192.168.1.0/24`).
+*   **Auto detect** the precise subnets (CIDR) and add them to `/etc/ntpd-rs/ntp.toml` (e.g., `allow 192.168.1.0/24`).
 *   **Install** `ntpd-rs` if missing, using the official pre-built binary or a dedicated PPA that does not pull in system-breaking dependencies.
 *   **Mask & Lock** competing NTP services (including `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`) via custom apt preferences to completely avoid package conflicts.
 *   **Append** NTS server IPs to `/etc/hosts` so ntpd-rs can resolve hostnames even when local DNS tracking is lagging during early boot phases.
@@ -69,28 +69,43 @@ The script will:
 How to Verify
 -------------
 
-### 1\. Check Time Sources
+### 1\. Check Time Sources & Status
 
 Run:
 
     ntp-ctl status
     
 
-You should see a list of configured NTS servers with their status. Look for the `refid` and `st` (stratum). A server marked with a `*` in the leftmost column is the current system peer (primary). Others may show `+` (acceptable) or `-` (discarded). The `reach` field is an octal value: `377` means the server is fully reachable.
+This shows a summary of the system clock (dispersion, delay, stratum) and a detailed breakdown for each NTS source. Look for:
+
+*   **Offset** – how far your clock drifts (in seconds).
+*   **Uncertainty** – the estimated error margin.
+*   **Missing polls** – if a server isn’t responding, this number climbs.
+*   **NTS cookies** – active encrypted sessions; for example, `8/8 available` means the server is fully encrypted and reachable.
+
+A server with many missing polls or a low cookie count (e.g., `5/8`) may be experiencing temporary connectivity issues, but the daemon will automatically retry.
 
 ### 2\. Verify NTS Encryption
 
-Run:
+Look at the **NTS cookies** line for each source in the `ntp-ctl status` output. A value of `8/8 available` indicates NTS is fully active for that server. If cookies are lower but still present, encryption is working; the daemon manages the pool automatically.
 
-    ntp-ctl status
+You can also check the `ntpd-rs` journal for NTS key exchange events:
+
+    journalctl -u ntpd-rs --no-pager | grep -i "nts\|new source"
     
 
-Look for lines indicating `NTS: yes` for each server. If NTS is active, the connection is authenticated. You can also inspect the ntpd-rs journal for NTS-KE (key establishment) handshake successes:
+Successful connections show `new source` messages with the server address. Warnings like `error while attempting key exchange … TimedOut` indicate a temporary handshake failure that the daemon will retry.
 
-    sudo journalctl -u ntpd-rs
+### 3\. Validate Configuration
+
+Confirm that the generated `ntp.toml` is syntactically correct:
+
+    ntp-ctl validate
     
 
-### 3\. Confirm Firewall Rules
+This prints the config file path and `Config looks good` if everything is fine.
+
+### 4\. Confirm Firewall Rules
 
 Run:
 
@@ -104,42 +119,66 @@ You should see an explicit `REDIRECT` rule for NTP (port 123) matching your indi
 Troubleshooting FAQ
 -------------------
 
-### Q: One of my servers shows unreachable or `reach = 0`. What does that mean?
+### Q: One of my servers shows many missing polls or low NTS cookies. What does that mean?
 
-In `ntp-ctl status` output, a `reach` value of `0` means no valid responses have been received recently. This is normal if a server is temporarily down. The daemon will automatically retry.
+Missing polls and a drop in available cookies (e.g., `5/8` instead of `8/8`) usually indicate that the server is temporarily unreachable or the NTS key exchange is struggling. The daemon will keep retrying. If the problem persists, check the server’s DNS resolution and network reachability.
 
-Example output (excerpt):
+Example from `ntp-ctl status` (a healthy system):
 
-         remote           refid      st t when poll reach   delay   offset  jitter
-    ==============================================================================
-    *time.cloudflare. .PPS.            3 u  512  64  377    1.234   -0.045   0.012
-    +ohio.time.syste  .PPS.            2 u  256  64  377    0.987   -0.012   0.008
-     virginia.time.sy .INIT.          16 u    -  64    0    0.000    0.000   0.000
-    -ntppool1.time.n  .PPS.            1 u  128  64  377    5.432    0.023   0.015
-    -ptbtime1.ptb.de .PPS.            1 u  512  64  377    8.901   -0.067   0.021
+    ntppool1.time.nl:4460 94.198.159.15:123 [NTS] (3)
+    	Offset:			-0.000670
+    	Uncertainty:		±0.000652
+    	Delay:			±0.109154
+    	Poll interval:		128s
+    	Missing polls:		0
+    	NTS cookies:		8/8 available
+    
+    ohio.time.system76.com:4460 3.134.129.152:123 [NTS] (2)
+    	Offset:			+0.003713
+    	Uncertainty:		±0.000427
+    	Delay:			±0.030009
+    	Poll interval:		64s
+    	Missing polls:		0
+    	NTS cookies:		8/8 available
+    
+    ptbtime1.ptb.de:4460 192.53.103.108:123 [NTS] (52)
+    	Offset:			+0.000000
+    	Uncertainty:		±2147483648.500000
+    	Delay:			±2147483648.500000
+    	Poll interval:		16s
+    	Missing polls:		8
+    	NTS cookies:		5/8 available
+    
+    time.cloudflare.com:4460 162.159.200.1:123 [NTS] (1)
+    	Offset:			+0.001174
+    	Uncertainty:		±0.000316
+    	Delay:			±0.010982
+    	Poll interval:		128s
+    	Missing polls:		0
+    	NTS cookies:		8/8 available
     
 
-Here `virginia.time.system76.com` shows `reach = 0` and `refid = .INIT.` – it hasn’t responded yet. Other servers are fine, so your clock remains secure.
+Here, `ptbtime1.ptb.de` has **8 missing polls** and only **5/8 cookies** – it’s experiencing intermittent issues. The clock remains accurate because other servers are fully available.
 
 **What to do:**
 
 1.  Wait 10–15 minutes – ntpd-rs will keep retrying.
-2.  Check DNS resolution: `nslookup virginia.time.system76.com` (should return `52.203.218.175`).
-3.  Verify the IP is reachable: `ping 52.203.218.175`.
-4.  If the server is permanently gone, edit the relevant server lines in the script’s configuration block and the corresponding IP mappings in the `/etc/hosts` block, then re‑run the script (see _Customizing Your Time Servers_).
+2.  Check DNS resolution: `nslookup ptbtime1.ptb.de` (should return `192.53.103.108`).
+3.  Verify the IP is reachable: `ping 192.53.103.108`.
+4.  If the server is permanently gone, edit the server entries in the script’s configuration block and the `/etc/hosts` mappings, then re‑run the script (see _Customizing Your Time Servers_).
 
-### Q: All servers show `reach = 0` or the list is empty. What’s wrong?
+### Q: All servers show high missing polls or no NTS cookies. What’s wrong?
 
 This usually indicates ntpd-rs cannot resolve server hostnames (DNS blocked) or cannot reach the internet on port 123/4460 (NTS). Steps:
 
 1.  Check that ntpd-rs is running: `systemctl status ntpd-rs`.
-2.  Look at the daemon log: `journalctl -u ntpd-rs --no-pager | tail -30`. Search for “could not resolve” or “NTS-KE” errors.
+2.  Look at the daemon log: `journalctl -u ntpd-rs --no-pager | tail -40`. Search for “could not resolve” or “error while attempting key exchange”.
 3.  Ensure the script has added the correct IPs to `/etc/hosts`: `cat /etc/hosts | grep -E 'time.cloudflare|ntppool1|ptbtime1|system76'`. If missing, re‑run the configuration script manually.
 4.  Verify the WAN interface allows outbound NTP/NTS traffic (the script does not block it, but a strict Firewalla policy might). Temporarily disable any NTP‑related app rules to test.
 
 ### Q: How do I know if NTS encryption is actually working?
 
-Run `ntp-ctl status` and look for the `NTS` flag per association. Additionally, examine the startup log: a successful NTS-KE handshake will be logged. If all servers fail NTS negotiation (e.g., NTS-KE port 4460/tcp is blocked), ntpd-rs may fall back to plain NTP if your configuration allows it (the script configures strict NTS, so fallback is not enabled – the server is simply marked unreachable). Check your firewall and ISP.
+In the `ntp-ctl status` output, each source shows an **NTS cookies** line. A value of `8/8 available` confirms NTS is active. You can also check the journal for successful key exchanges. If the daemon logs `error while attempting key exchange` for a server, that particular connection may have failed (but others likely still work). Check your firewall and ISP for port 4460/tcp.
 
 ### Q: I changed the server list in the script, but the new servers don’t work.
 
@@ -208,7 +247,7 @@ The script automatically discovers:
 
 *   All active **bridge** interfaces (`br0`, `br1`, …)
 *   Physical interfaces (if no bridges are active) – explicitly skipping WAN configurations (`wan`, `ppp`, `tun`, `wg`, `vpn`)
-*   For each active configuration, it extracts the **precise CIDR** (e.g., `192.168.1.0/24`) and builds localized `allow` directives in `ntpd-rs.toml`.
+*   For each active configuration, it extracts the **precise CIDR** (e.g., `192.168.1.0/24`) and builds localized `allow` directives in `/etc/ntpd-rs/ntp.toml`.
 
 This means **you don’t need to manually edit any interface or subnet settings** – it Just Works.
 
@@ -216,7 +255,7 @@ This means **you don’t need to manually edit any interface or subnet settings*
 
 If you want to use different NTS servers, update two places in the script:
 
-1.  **`ntpd-rs.toml` block**: Modify the `[[server]]` entries (address and NTS flag).
+1.  **`ntp.toml` configuration block**: Modify the `[[server]]` entries (address and NTS flag).
 2.  **`/etc/hosts` block**: Update the corresponding IP address mappings so the system can resolve them during early boot.
 
 **Tip:** You can find a list of reliable NTS-capable servers at the community tracker: [https://github.com/jauderho/nts-servers](https://github.com/jauderho/nts-servers).
@@ -238,7 +277,7 @@ If you want to remove ntpd-rs and cleanly restore Firewalla’s default time con
     sudo rm -f /etc/systemd/system/ntpd-rs-boot-enforce.service
     sudo systemctl daemon-reload
     sudo rm -f /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh
-    sudo rm -f /etc/ntpd-rs/ntpd-rs.toml
+    sudo rm -f /etc/ntpd-rs/ntp.toml
     
 
 ### Step 2: Delete Automated Crontab Entries
