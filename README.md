@@ -91,7 +91,7 @@ Look at the **NTS cookies** line for each source in the `ntp-ctl status` output.
 
 You can also check the `ntpd-rs` journal for NTS key exchange events:
 
-    journalctl -u ntpd-rs --no-pager | grep -i "nts\|new source"
+    sudo journalctl -u ntpd-rs --no-pager | grep -i "nts\|new source"
     
 
 Successful connections show `new source` messages with the server address. Warnings like `error while attempting key exchange … TimedOut` indicate a temporary handshake failure that the daemon will retry.
@@ -171,8 +171,8 @@ Here, `ptbtime1.ptb.de` has **8 missing polls** and only **5/8 cookies** – it�
 
 This usually indicates ntpd-rs cannot resolve server hostnames (DNS blocked) or cannot reach the internet on port 123/4460 (NTS). Steps:
 
-1.  Check that ntpd-rs is running: `systemctl status ntpd-rs`.
-2.  Look at the daemon log: `journalctl -u ntpd-rs --no-pager | tail -40`. Search for “could not resolve” or “error while attempting key exchange”.
+1.  Check that ntpd-rs is running: `sudo systemctl status ntpd-rs`.
+2.  Look at the daemon log: `sudo journalctl -u ntpd-rs --no-pager | tail -40`. Search for “could not resolve” or “error while attempting key exchange”.
 3.  Ensure the script has added the correct IPs to `/etc/hosts`: `cat /etc/hosts | grep -E 'time.cloudflare|ntppool1|ptbtime1|system76'`. If missing, re‑run the configuration script manually.
 4.  Verify the WAN interface allows outbound NTP/NTS traffic (the script does not block it, but a strict Firewalla policy might). Temporarily disable any NTP‑related app rules to test.
 
