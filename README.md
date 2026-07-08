@@ -12,13 +12,13 @@ BIG DISCLAIMER (READ THIS FIRST)
 > 
 > **USE AT YOUR OWN RISK.** Modifying your router always carries risks. I am not responsible if your device malfunctions. Know how to **reflash** your Firewalla and have a recovery drive ready **before** proceeding.
 > 
-> **NEVER RUN `APT UPGRADE`.** This script only installs `ntpd-rs` from its official pre-built binary (or a dedicated PPA); it does **not** upgrade system packages. Firewalla uses a custom Ubuntu OS; upgrading generic Ubuntu packages will probably **destabilize or brick** your box. The script uses Firewalla's safe `apt-get.sh` wrapper where possible and installs ntpd-rs in a contained manner.
+> **NEVER RUN `APT UPGRADE`.** This script only installs `ntpd-rs` from its official pre-built binary; it does **not** upgrade system packages. Firewalla uses a custom Ubuntu OS; upgrading generic Ubuntu packages will probably **destabilize or brick** your box. The script uses Firewalla's safe `apt-get.sh` wrapper where possible and installs ntpd-rs in a contained manner.
 > 
 > **TESTED ON FIREWALLA GOLD PLUS** running **Ubuntu 22.04** (fresh image from Firewalla). It should work on other modern models, but is **not guaranteed** on older OS versions (18.04, 20.04).
 > 
 > **PLEASE READ THIS ENTIRE README** to understand what you’re getting into **and how to revert** if needed.
 > 
-> **NTP INTERCEPT STILL APPLIES.** Clients on your LAN behind NTP intercept must still use **plain NTP** (not NTS) because Firewalla only intercepts NTP. If you have devices with NTS-capable clients (like newer systemd-timesyncd or Chrony) behind NTP intercept on your LAN, they will fail to sync unless you either:
+> **NTP INTERCEPT STILL APPLIES.** Clients on your LAN behind NTP intercept must still use **plain NTP** (not NTS) because Firewalla only intercepts NTP. If you have devices with NTS-capable clients (like newer `systemd-timesyncd` or Chrony) behind NTP intercept on your LAN, they will fail to sync unless you either:
 > 
 > *   Reconfigure them to use plain NTP, **or**
 > *   Turn off NTP Intercept for that network (so their NTS requests reach the internet/WAN directly).
@@ -58,11 +58,12 @@ The script will:
 
 *   **Auto-populate Cron:** Automatically checks, cleans, and adds its own execution entry (`0 4 * * * root ...`) to the system crontab (`/etc/crontab`). If the script path changes, running it manually updates the cron mapping automatically.
 *   **Auto discover** all your LAN interfaces (bridges and physical, excluding WAN structures like `wan`, `ppp`, `tun`, `wg`, `vpn`).
-*   **Auto detect** the precise subnets (CIDR) and add them to `/etc/ntpd-rs/ntp.toml` (e.g., `allow 192.168.1.0/24`).
-*   **Install** `ntpd-rs` using the [official Github pre-built `.deb` binary (currently 1.9.0)](https://github.com/pendulum-project/ntpd-rs/releases/tag/v1.9.0).
+*   **Auto detect** the precise LAN IPs and configure them in `/etc/ntpd-rs/ntp.toml`.
+*   **Install** `ntpd-rs` using the official pre-built `.deb` binary.
 *   **Mask & Lock** competing NTP services (including `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`) via custom apt preferences to completely avoid package conflicts.
 *   **Append** NTS server IPs to `/etc/hosts` so ntpd-rs can resolve hostnames even when local DNS tracking is lagging during early boot phases.
 *   **Apply** iptables and ip6tables redirection rules to route NTP traffic cleanly on all active LAN interfaces.
+*   **Use** seven working (as of July 2026) NTS servers.
 
 * * *
 
@@ -74,45 +75,164 @@ How to Verify
 Run:
 
     ntp-ctl status
+
+Example output from a healthy system with all seven servers:
+
+    Synchronization status:
+    	Dispersion:	0.000137s
+    	Delay:		0.024822s
+    	Stratum:	2
+    
+    Sources:
+    
+    brazil.time.system76.com:4460 18.228.202.30:123 [NTS] (7)
+    	Offset:			-0.005129
+    	Uncertainty:		±0.000341
+    	Delay:			±0.131975
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.001663s
+    	Root delay:		0.001083s
+    	NTS cookies:		8/8 available
+    
+    ntppool1.time.nl:4460 94.198.159.15:123 [NTS] (5)
+    	Offset:			-0.000165
+    	Uncertainty:		±0.000592
+    	Delay:			±0.108101
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.000015s
+    	Root delay:		0.000015s
+    	NTS cookies:		8/8 available
+    
+    nts.teambelgium.net:4460 91.177.126.188:123 [NTS] (4)
+    	Offset:			-0.001769
+    	Uncertainty:		±0.000466
+    	Delay:			±0.101369
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.000015s
+    	Root delay:		0.000015s
+    	NTS cookies:		8/8 available
+    
+    ohio.time.system76.com:4460 3.134.129.152:123 [NTS] (2)
+    	Offset:			+0.003098
+    	Uncertainty:		±0.000406
+    	Delay:			±0.029935
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.002136s
+    	Root delay:		0.021332s
+    	NTS cookies:		8/8 available
+    
+    time.cincura.net:4460 85.163.168.227:123 [NTS] (6)
+    	Offset:			+0.000507
+    	Uncertainty:		±0.000443
+    	Delay:			±0.116651
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.000031s
+    	Root delay:		0.000015s
+    	NTS cookies:		8/8 available
+    
+    time.cloudflare.com:4460 162.159.200.1:123 [NTS] (1)
+    	Offset:			+0.001761
+    	Uncertainty:		±0.000346
+    	Delay:			±0.011394
+    	Poll interval:		64s
+    	Missing polls:		0
+    	Root dispersion:	0.000610s
+    	Root delay:		0.013428s
+    	NTS cookies:		8/8 available
+    
+    time.web-clock.ca:4460 173.206.104.134:123 [NTS] (3)
+    	Offset:			+0.000342
+    	Uncertainty:		±0.000188
+    	Delay:			±0.035697
+    	Poll interval:		32s
+    	Missing polls:		0
+    	Root dispersion:	0.000031s
+    	Root delay:		0.000015s
+    	NTS cookies:		8/8 available
+    
+    Servers:
+    
+    192.168.1.1:123
+    	Ignored			0
+    	Response send errors	0
+    	NTS NAK			0
+    	Received		311
+    	Accepted		311
+    	Denied			0
+    	Rate limited		0
+    	NTS Received		0
+    	NTS Accepted		0
+    	NTS Denied		0
+    	NTS Rate limited	0
     
 
-This shows a summary of the system clock (dispersion, delay, stratum) and a detailed breakdown for each NTS source. Look for:
+Look for:
 
 *   **Offset** – how far your clock drifts (in seconds).
 *   **Uncertainty** – the estimated error margin.
 *   **Missing polls** – if a server isn’t responding, this number climbs.
-*   **NTS cookies** – active encrypted sessions; for example, `8/8 available` means the server is fully encrypted and reachable.
-
-A server with many missing polls or a low cookie count (e.g., `5/8`) may be experiencing temporary connectivity issues, but the daemon will automatically retry.
+*   **NTS cookies** – active encrypted sessions; `8/8 available` means the server is fully encrypted and reachable.
 
 ### 2\. Verify NTS Encryption
 
-Look at the **NTS cookies** line for each source in the `ntp-ctl status` output. A value of `8/8 available` indicates NTS is fully active for that server. If cookies are lower but still present, encryption is working; the daemon manages the pool automatically.
+Look at the **NTS cookies** line for each source. A value of `8/8 available` indicates NTS is fully active. Even if cookies are lower but still present, encryption is working; the daemon manages the pool automatically.
 
-You can also check the `ntpd-rs` journal for NTS key exchange events:
+You can also check the journal:
 
     sudo journalctl -u ntpd-rs --no-pager | grep -i "nts\|new source"
-    
 
-Successful connections show `new source` messages with the server address. Warnings like `error while attempting key exchange … TimedOut` indicate a temporary handshake failure that the daemon will retry.
+Successful connections show `new source` messages. Warnings like `error while attempting key exchange … TimedOut` indicate a temporary handshake failure that the daemon will retry.
 
 ### 3\. Validate Configuration
 
-Confirm that the generated `ntp.toml` is syntactically correct:
-
     ntp-ctl validate
-    
 
-This prints the config file path and `Config looks good` if everything is fine.
+If the syntax is correct, you’ll see `Config looks good`.
 
 ### 4\. Confirm Firewall Rules
 
-Run:
-
     sudo iptables -t nat -L PREROUTING -v -n
-    
 
-You should see an explicit `REDIRECT` rule for NTP (port 123) matching your individual LAN interfaces and actively capturing packets.
+You should see an explicit `REDIRECT` rule for port 123 matching your LAN interfaces and actively capturing packets.
+
+* * *
+
+Understanding `ntp-ctl status` Output
+-------------------------------------
+
+The output is split into two main parts: **Synchronization status** (your clock’s overall health) and **Sources** (each upstream server).
+
+### Synchronization Status
+
+*   **Dispersion** – How “spread out” the time measurements are. Lower is better; a few microseconds is excellent.
+*   **Delay** – Round‑trip network delay to the selected source. A few tens of milliseconds is typical for an internet connection.
+*   **Stratum** – Distance from a reference clock (atomic clock, GPS). Stratum 2 means you are two steps away, which is perfect for a home router.
+
+### Source Metrics
+
+| Metric | Meaning |
+|--------|---------|
+| **Offset** | Difference between your clock and the server's clock. Small values (<1 ms) are good. |
+| **Uncertainty** | The daemon's confidence interval. Smaller is better. |
+| **Delay** | Measured network delay to that server. |
+| **Poll interval** | How often the daemon queries the server (in seconds). It adapts automatically. |
+| **Missing polls** | How many expected responses never arrived. A healthy server should show 0. |
+| **Root dispersion / delay** | Cumulative error from the server to the reference clock. Small values indicate a well‑synchronised server. |
+| **NTS cookies** | Number of pre‑shared keys available for NTS. 8/8 = fully encrypted. Fewer cookies still mean NTS is active, but may require re‑keying. |
+
+### Server Statistics (Local)
+
+The `Servers:` block shows your local NTP server statistics – i.e. how many client requests your Firewalla has handled.
+
+*   **Received / Accepted** – Total NTP requests received and successfully answered. They should be equal under normal conditions.
+*   **Ignored / Denied / Rate limited** – Requests dropped due to configuration, rate limits, or access rules. Zero is healthy.
+*   **NTS NAK** – Number of NTS key exchange failures (should stay 0).
+*   **NTS Received / Accepted** – If you had NTS clients connecting directly, these would show activity. In an intercept‑only setup they remain 0.
 
 * * *
 
@@ -121,26 +241,10 @@ Troubleshooting FAQ
 
 ### Q: One of my servers shows many missing polls or low NTS cookies. What does that mean?
 
-Missing polls and a drop in available cookies (e.g., `5/8` instead of `8/8`) usually indicate that the server is temporarily unreachable or the NTS key exchange is struggling. The daemon will keep retrying. If the problem persists, check the server’s DNS resolution and network reachability.
+Missing polls and a drop in available cookies (e.g. `5/8` instead of `8/8`) usually indicate that the server is temporarily unreachable or the NTS key exchange is struggling. The daemon will keep retrying. If the problem persists, check DNS and network reachability.
 
-Example from `ntp-ctl status` (a healthy system):
+**Example of a struggling server** (from a previous test configuration – _not_ part of the default seven servers anymore):
 
-    ntppool1.time.nl:4460 94.198.159.15:123 [NTS] (3)
-    	Offset:			-0.000670
-    	Uncertainty:		±0.000652
-    	Delay:			±0.109154
-    	Poll interval:		128s
-    	Missing polls:		0
-    	NTS cookies:		8/8 available
-    
-    ohio.time.system76.com:4460 3.134.129.152:123 [NTS] (2)
-    	Offset:			+0.003713
-    	Uncertainty:		±0.000427
-    	Delay:			±0.030009
-    	Poll interval:		64s
-    	Missing polls:		0
-    	NTS cookies:		8/8 available
-    
     ptbtime1.ptb.de:4460 192.53.103.108:123 [NTS] (52)
     	Offset:			+0.000000
     	Uncertainty:		±2147483648.500000
@@ -149,65 +253,51 @@ Example from `ntp-ctl status` (a healthy system):
     	Missing polls:		8
     	NTS cookies:		5/8 available
     
-    time.cloudflare.com:4460 162.159.200.1:123 [NTS] (1)
-    	Offset:			+0.001174
-    	Uncertainty:		±0.000316
-    	Delay:			±0.010982
-    	Poll interval:		128s
-    	Missing polls:		0
-    	NTS cookies:		8/8 available
-    
 
-Here, `ptbtime1.ptb.de` has **8 missing polls** and only **5/8 cookies** – it’s experiencing intermittent issues. The clock remains accurate because other servers are fully available.
+Here the server shows huge uncertainty, 8 missing polls, and only 5 cookies – it is essentially unusable. The clock remains accurate because the other servers are fully functional.
 
-**What to do:**
+### Q: What if a server doesn’t appear in the list at all?
 
-1.  Wait 10–15 minutes – ntpd-rs will keep retrying.
-2.  Check DNS resolution: `nslookup ptbtime1.ptb.de` (should return `192.53.103.108`).
-3.  Verify the IP is reachable: `ping 192.53.103.108`.
-4.  If the server is permanently gone, edit the server entries in the script’s configuration block and the `/etc/hosts` mappings, then re‑run the script (see _Customizing Your Time Servers_).
+If a configured server never responds, ntpd-rs may simply not show it in the output (or list it with extremely high missing polls). That’s fine – the daemon will ignore it and rely on the healthy ones. Check the journal for `could not resolve` or `error while attempting key exchange` to see why it failed.
 
 ### Q: All servers show high missing polls or no NTS cookies. What’s wrong?
 
-This usually indicates ntpd-rs cannot resolve server hostnames (DNS blocked) or cannot reach the internet on port 123/4460 (NTS). Steps:
+This usually means ntpd-rs cannot resolve hostnames (DNS blocked) or cannot reach the internet on port 123/4460 (NTS). Steps:
 
-1.  Check that ntpd-rs is running: `sudo systemctl status ntpd-rs`.
-2.  Look at the daemon log: `sudo journalctl -u ntpd-rs --no-pager | tail -40`. Search for “could not resolve” or “error while attempting key exchange”.
-3.  Ensure the script has added the correct IPs to `/etc/hosts`: `cat /etc/hosts | grep -E 'time.cloudflare|ntppool1|ptbtime1|system76'`. If missing, re‑run the configuration script manually.
-4.  Verify the WAN interface allows outbound NTP/NTS traffic (the script does not block it, but a strict Firewalla policy might). Temporarily disable any NTP‑related app rules to test.
+1.  Check that ntpd-rs is running: `sudo systemctl status ntpd-rs`
+2.  Look at the daemon log: `sudo journalctl -u ntpd-rs --no-pager | tail -40`
+3.  Ensure the script added correct IPs to `/etc/hosts`: `cat /etc/hosts | grep -E 'time.cloudflare|ntppool1|time.nl|cincura|teambelgium|web-clock|system76'`
+4.  Verify WAN outbound rules – temporarily disable any NTP‑related app rules to test.
 
 ### Q: How do I know if NTS encryption is actually working?
 
-In the `ntp-ctl status` output, each source shows an **NTS cookies** line. A value of `8/8 available` confirms NTS is active. You can also check the journal for successful key exchanges. If the daemon logs `error while attempting key exchange` for a server, that particular connection may have failed (but others likely still work). Check your firewall and ISP for port 4460/tcp.
+In the `ntp-ctl status` output, each source shows an **NTS cookies** line. `8/8 available` confirms active NTS. You can also grep the journal for `new source` messages. If you see `error while attempting key exchange`, that particular connection failed – but others likely still work.
 
 ### Q: I changed the server list in the script, but the new servers don’t work.
 
-*   Did you update both the `[[server]]` entries in the ntpd-rs config block **and** the `/etc/hosts` block inside the script? Both must match.
-*   After editing the script, re‑run it manually to regenerate system profiles: `sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh`.
-*   Verify the new entries in `/etc/hosts` are present and correct.
-*   Check if the server actually supports NTS (the script requires the `nts` flag). Use the community list at [https://github.com/jauderho/nts-servers](https://github.com/jauderho/nts-servers).
+*   Did you update both the `[[source]]` entries **and** the `/etc/hosts` block inside the script? Both must match.
+*   After editing, re‑run the script manually to regenerate configs.
+*   Use `--update-config` for a quick regeneration: `sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config`
+*   Verify the server actually supports NTS. Check the community list at [https://github.com/jauderho/nts-servers](https://github.com/jauderho/nts-servers).
 
 ### Q: The “NTP Intercept” slider in the Firewalla app shows OFF, but clients still can’t use their own NTP servers.
 
-That’s expected. The script enforces interception independently via `iptables` rules at every boot and via cron. The app slider only controls Firewalla’s built‑in intercept feature, not the custom rules. If you truly want to disable interception, you must uninstall the script (see _Uninstall / Revert to Stock_).
+That’s expected. The script enforces interception independently via `iptables` rules at every boot and via cron. The app slider only controls Firewalla’s built‑in intercept, not the custom rules. To truly disable interception, you must uninstall the script (see _Uninstall_).
 
 ### Q: How can I temporarily disable interception for testing?
 
-Manually flush the NAT rules (they will be automatically re‑applied on the next cron run or reboot sequence):
-
     sudo iptables -t nat -F PREROUTING
-    
 
-To restore immediately, re‑run the script: `sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh`.
+The rules will be automatically re‑applied on the next cron run or reboot.
 
 * * *
 
 What About Updates & Boot Persistence?
 --------------------------------------
 
-*   **Boot persistence service:** The script generates a native local systemd service file (`/etc/systemd/system/ntpd-rs-boot-enforce.service`) mapped to the `multi-user.target` sequence. This guarantees it triggers reliably every boot without racing other startup configurations.
-*   **Daily cron job:** The script **automatically** adds or updates its own cleanly tagged cron entry (`0 4 * * * root /path/to/script.sh &>/dev/null`) directly inside the **system crontab** (`/etc/crontab`). It runs as root with full privileges to manage routing updates and reload underlying service states.
-*   **Health checks & Self-Repair:** Every script execution (boot, cron, manual) triggers a lightweight evaluation loop. It validates that the `ntpd-rs` daemon is fully active and has at least one healthy time source. If an error or an unhealthy loop state is isolated, it attempts to restart the service up to 3 times before generating a critical log block.
+*   **Boot persistence service:** The script creates `/etc/systemd/system/ntpd-rs-boot-enforce.service` and enables it for `multi-user.target`, ensuring it runs at every boot.
+*   **Daily cron job:** A cleanly tagged entry (`0 4 * * * root ...`) is added to `/etc/crontab`. It runs as root and re‑enforces configuration, firewall rules, and health checks.
+*   **Health checks & Self-Repair:** Every execution checks that ntpd-rs is active and has healthy sources. If not, it tries to restart the daemon up to 3 times before logging a critical error.
 
 * * *
 
@@ -216,117 +306,112 @@ Technical Details & Caveats
 
 ### Competing Services Neutralization
 
-This script features a built-in block engine that neutralizes all conflicting NTP services. It masks and stops `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`, and even older `ntpd-rs` instances if present. It also places an apt preferences pin to prevent those packages from being reinstalled by future system updates.
+The script stops and masks `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`, and any old ntpd-rs instances. It also places an apt preferences pin to block those packages from being reinstalled by future updates.
 
 ### Hosts File Fix
 
-Firewalla’s sandbox may block the unprivileged `ntp` user (under which ntpd-rs runs) from accessing generic local DNS profiles during early boot. To bypass this, the script **hardcodes** the NTS server IPs into `/etc/hosts`.
+Firewalla’s sandbox may block the unprivileged `ntp` user from accessing local DNS early in boot. To bypass this, the script inserts a marked block in `/etc/hosts`:
 
-After running, your `/etc/hosts` file will include:
-
+    # BEGIN NTPD-RS HOSTS
     162.159.200.1    time.cloudflare.com
     94.198.159.15    ntppool1.time.nl
-    192.53.103.108   ptbtime1.ptb.de
     3.134.129.152    ohio.time.system76.com
-    52.203.218.175   virginia.time.system76.com
+    18.228.202.30    brazil.time.system76.com
+    85.163.168.227   time.cincura.net
+    91.177.126.188   nts.teambelgium.net
+    173.206.104.134  time.web-clock.ca
+    # END NTPD-RS HOSTS
     
 
-### Why 5 Servers?
+### Why 7 Servers?
 
-We moved beyond a minimal set to a 5-server quorum for better geographic diversity and failover reliability. Most NTS experts recommend at least 4 servers but no more than 10. The five selected are:
+The NTP community often recommends at least **four to five** NTS servers for robust time keeping. However, many public NTS servers are run by individuals or small groups and can be less reliable than traditional NTP servers. After testing, we found **seven** servers that were consistently reachable and delivered correct time. We included all seven in the default configuration, but you are free to trim the list to five (or even fewer) by editing the script and running `--update-config`. The chosen servers are:
 
-*   Cloudflare – Global Anycast
-*   TimeNL & PTB – European government-backed stability
-*   System76 (Ohio & Virginia) – Low-latency US regional redundancy
+*   **Cloudflare** – Global anycast, highly reliable.
+*   **TimeNL** – European government-backed stability.
+*   **System76** (Ohio & Brazil) – US and South American redundancy.
+*   **Cincura.net, TeamBelgium, Web‑Clock.ca** – Community‑maintained, geographically diverse.
 
-**Limitation:** If these upstream IPs change (rare), you’ll need to adjust them inside your script definitions and let it rebuild your `/etc/hosts` file.
+**Limitation:** If any of these IPs change (rare), you’ll need to update them in the script and re‑run it.
 
-### Auto Detection of Interfaces & Subnets
+### Auto Detection of Interfaces & IPs
 
-The script automatically discovers:
-
-*   All active **bridge** interfaces (`br0`, `br1`, …)
-*   Physical interfaces (if no bridges are active) – explicitly skipping WAN configurations (`wan`, `ppp`, `tun`, `wg`, `vpn`)
-*   For each active configuration, it extracts the **precise CIDR** (e.g., `192.168.1.0/24`) and builds localized `allow` directives in `/etc/ntpd-rs/ntp.toml`.
-
-This means **you don’t need to manually edit any interface or subnet settings** – it Just Works.
+The script automatically discovers your LAN bridges and physical interfaces, extracts their IPv4 addresses, and writes corresponding `[[server]]` stanzas into `ntp.toml`. No manual subnet configuration is needed.
 
 ### Customizing Your Time Servers
 
-If you want to use different NTS servers, update two places in the script:
+To add or remove servers, edit the script’s two configuration blocks (NTP sources + `/etc/hosts` block) and run:
 
-1.  **`ntp.toml` configuration block**: Modify the `[[server]]` entries (address and NTS flag).
-2.  **`/etc/hosts` block**: Update the corresponding IP address mappings so the system can resolve them during early boot.
+    sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config
 
-**Tip:** You can find a list of reliable NTS-capable servers at the community tracker: [https://github.com/jauderho/nts-servers](https://github.com/jauderho/nts-servers).
+This regenerates the configuration and restarts ntpd-rs in seconds.
 
 ### Cron & Permissions
 
-The script injects its cron job into `/etc/crontab` with the **user field explicitly declared as `root`** – so the command runs with full systemic permissions. You do **not** need to manually use `sudo` inside the cron layout string.
+The cron job is placed in `/etc/crontab` with the user field set to `root`, so it runs with full privileges. You do not need to add `sudo` inside the cron command.
 
 * * *
 
 Uninstall / Revert to Stock
 ---------------------------
 
-If you want to remove ntpd-rs and cleanly restore Firewalla’s default time configuration, execute these clean-up commands as root.
+To remove ntpd-rs and restore Firewalla’s default time configuration, run the following as root:
 
-### Step 1: Remove the Services & Core Scripts
-
+    # Stop and disable any running ntpd-rs service
+    sudo systemctl stop ntpd-rs ntpd-rsd 2>/dev/null
+    sudo systemctl disable ntpd-rs ntpd-rsd 2>/dev/null
+    
+    # Purge the package
+    sudo /home/pi/firewalla/scripts/apt-get.sh purge -y ntpd-rs
+    
+    # Disable boot-enforcement service
     sudo systemctl disable ntpd-rs-boot-enforce.service 2>/dev/null
-    sudo rm -f /etc/systemd/system/ntpd-rs-boot-enforce.service
-    sudo systemctl daemon-reload
-    sudo rm -f /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh
-    sudo rm -f /etc/ntpd-rs/ntp.toml
     
-
-### Step 2: Delete Automated Crontab Entries
-
-    sudo sed -i '/# ntpd-rs NTS Service/,+1d' /etc/crontab
+    # Remove cron entry
+    sudo sed -i '/# NTPD-RS NTS Service/,+1d' /etc/crontab
     
-
-### Step 3: Clean Up Apt Preferences & Hosts Definitions
-
+    # Remove apt preferences
     sudo rm -f /etc/apt/preferences.d/block-ntp
-    sudo sed -i '/# Cloudflare/,$d' /etc/hosts
     
-
-### Step 4: Remove ntpd-rs Package
-
-If you installed via the script’s packaged method, remove it accordingly (the script may have placed a `.deb` or used a PPA purge). For a manual binary installation:
-
-    sudo rm -f /usr/local/bin/ntpd-rs /usr/local/bin/ntp-ctl
+    # Remove /etc/hosts block
+    sudo sed -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts
+    
+    # Delete all remaining files and directories
+    sudo rm -f /etc/systemd/system/ntpd-rs-boot-enforce.service \
+              /etc/ntpd-rs-url.conf \
+              /etc/ntpd-rs-interface.conf \
+              /tmp/ntpd_rs_restart_counter \
+              /tmp/ntpd_rs_last_health \
+              /log/ntpd-rs-installer.log
     sudo rm -rf /etc/ntpd-rs
+    sudo systemctl daemon-reload
     
-
-### Step 5: Restore Default Time Service
-
-Firewalla uses `systemd-timesyncd` by default. To restore and clear systemic blocks:
-
-    /home/pi/firewalla/scripts/apt-get.sh install systemd-timesyncd
-    sudo systemctl unmask systemd-timesyncd
-    sudo systemctl enable systemd-timesyncd
+    # Delete the installer script itself
+    sudo rm -f /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh
+    
+    # Restore systemd-timesyncd
+    sudo /home/pi/firewalla/scripts/apt-get.sh install systemd-timesyncd && \
+    sudo systemctl unmask systemd-timesyncd && \
+    sudo systemctl enable systemd-timesyncd && \
     sudo systemctl start systemd-timesyncd
     
-
-### Step 6: Reboot (Mandatory)
-
-    sudo reboot
+    # Reboot
+    sudo reboot now
     
 
-A full system reboot is required to drop active `iptables` redirects safely and return complete time configuration management back to the native Firewalla mobile application interface.
+A full reboot is required to drop the iptables redirects and return time management entirely to Firewalla’s mobile app.
 
 * * *
 
 Final Notes
 -----------
 
-*   The script is built to be entirely low-risk and completely revertible—it doesn't leave orphaned configuration modifications, does not lock running dependencies, and explicitly tracks system status metrics.
-*   The automated cron task fires daily at **4:00 AM**, cleanly falling outside Firewalla's typical firmware update window so that configuration modifications are evaluated and restored rapidly.
+*   The script is designed to be low‑risk and completely revertible. It leaves no orphaned configuration and tracks its own health metrics.
+*   The daily cron fires at **4:00 AM**, outside Firewalla’s typical firmware update window, so configuration is quickly restored if disturbed.
 
 * * *
 
 Credits & Community
 -------------------
 
-This project was built with input from the Firewalla community. If you have improvements or find issues, please open an issue or pull request. Contributions are welcome!
+Built with input from the Firewalla community. If you have improvements or find issues, please open an issue or pull request. Contributions are welcome!
