@@ -374,19 +374,18 @@ done
 NTPD_SERVICE=$(find_ntpd_service_name)
 log "Using systemd unit: ${NTPD_SERVICE}.service"
 
+# ─────────────────── CONFIGURATION (NTS ONLY) ──────────────────────
 log "Applying ntpd-rs NTS configuration..."
 
 $SED -i '/# Cloudflare/,$d' /etc/hosts 2>/dev/null || true
 $CAT >> /etc/hosts <<EOF
-# Cloudflare
 162.159.200.1    time.cloudflare.com
-# Netherlands
 94.198.159.15    ntppool1.time.nl
-# Germany
-192.53.103.108   ptbtime1.ptb.de
-# System76
 3.134.129.152    ohio.time.system76.com
-52.203.218.175   virginia.time.system76.com
+85.163.168.227   time.cincura.net
+91.177.126.188   nts.teambelgium.net
+173.206.104.134  time.web-clock.ca
+18.228.202.30    brazil.time.system76.com
 EOF
 
 mkdir -p /etc/ntpd-rs
@@ -404,29 +403,41 @@ address = "ohio.time.system76.com"
 
 [[source]]
 mode = "nts"
-address = "virginia.time.system76.com"
-
-[[source]]
-mode = "nts"
 address = "ntppool1.time.nl"
 
 [[source]]
 mode = "nts"
-address = "ptbtime1.ptb.de"
+address = "brazil.time.system76.com"
 
+[[source]]
+mode = "nts"
+address = "time.cincura.net"
+
+[[source]]
+mode = "nts"
+address = "nts.teambelgium.net"
+
+[[source]]
+mode = "nts"
+address = "time.web-clock.ca"
+
+# Listen on all discovered LAN IPs
 $(for ip in $LAN_IPS; do
 echo "[[server]]"
 echo "listen = \"$ip:123\""
 echo ""
 done)
 
+# Observability socket for ntp-ctl (ntpd-rs >= 1.9.0)
 [observability]
 observation-path = "/run/ntpd-rs/observe"
 EOF
 chmod 644 "$NTPD_CONFIG"
 
+# Ensure socket directory exists (tmpfs, so create at runtime)
 mkdir -p /run/ntpd-rs
 
+# Unit overrides
 mkdir -p /etc/systemd/system/${NTPD_SERVICE}.service.d
 $CAT > /etc/systemd/system/${NTPD_SERVICE}.service.d/override.conf <<EOF
 [Unit]
