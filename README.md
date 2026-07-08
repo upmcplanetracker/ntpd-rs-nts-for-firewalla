@@ -74,7 +74,7 @@ How to Verify
 
 Run:
 
-    ntp-ctl status
+    ntp-ctl -c /etc/ntpd-rs/ntp.toml status
 
 Example output from a healthy system with all seven servers:
 
@@ -396,7 +396,7 @@ To remove ntpd-rs and restore Firewalla’s default time configuration, run the 
     sudo systemctl start systemd-timesyncd
     
     # Reboot
-    sudo reboot now
+    sudo reboot
     
 
 A full reboot is required to drop the iptables redirects and return time management entirely to Firewalla’s mobile app.
