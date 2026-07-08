@@ -74,7 +74,7 @@ How to Verify
 
 Run:
 
-    ntp-ctl -c /etc/ntpd-rs/ntp.toml status
+    ntp-ctl status
 
 Example output from a healthy system with all seven servers:
 
