@@ -10,13 +10,18 @@ URL_CONFIG="/etc/ntpd-rs-url.conf"
 SYSTEMD_BOOT_SERVICE="/etc/systemd/system/ntpd-rs-boot-enforce.service"
 
 DEB_URL=""
+UPDATE_CONFIG=0
 
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: ${SCRIPT_NAME} <url-to-ntpd-rs-deb-package>"
+            echo "Usage: ${SCRIPT_NAME} [--update-config] <url-to-ntpd-rs-deb-package>"
             echo "   or if URL is already saved: ${SCRIPT_NAME}"
+            echo "   --update-config   Regenerate /etc/hosts and ntp.toml only, then restart service."
             exit 0
+            ;;
+        --update-config)
+            UPDATE_CONFIG=1
             ;;
         *)
             if [ -z "$DEB_URL" ]; then DEB_URL="$arg"; fi
@@ -24,20 +29,22 @@ for arg in "$@"; do
     esac
 done
 
-if [ -z "$DEB_URL" ]; then
+if [ -z "$DEB_URL" ] && [ "$UPDATE_CONFIG" -eq 0 ]; then
     if [ -f "$URL_CONFIG" ]; then
         DEB_URL=$(head -n1 "$URL_CONFIG")
     else
         echo "Error: No package URL provided and $URL_CONFIG not found."
-        echo "Usage: ${SCRIPT_NAME} <url-to-ntpd-rs-deb-package>"
+        echo "Usage: ${SCRIPT_NAME} [--update-config] <url-to-ntpd-rs-deb-package>"
         exit 1
     fi
 fi
 
-echo "$DEB_URL" > "$URL_CONFIG"
+if [ "$UPDATE_CONFIG" -eq 0 ]; then
+    echo "$DEB_URL" > "$URL_CONFIG"
+fi
 
 CONFIG_FILE="/etc/ntpd-rs-interface.conf"
-HEALTH_CHECK_INTERVAL=300           5 minutes
+HEALTH_CHECK_INTERVAL=300           # 5 minutes
 MAX_RESTARTS=3
 RESTART_COUNTER_FILE="/tmp/ntpd_rs_restart_counter"
 LAST_HEALTH_CHECK="/tmp/ntpd_rs_last_health"
@@ -252,6 +259,86 @@ EOF
 
 log "===== NTPD-RS enforcement script started ====="
 
+# ─────────────────── FAST UPDATE MODE (--update-config) ──────────────────────
+if [ "$UPDATE_CONFIG" -eq 1 ]; then
+    log "Update‑config mode: regenerating /etc/hosts and ntp.toml, then restarting service."
+
+    # Re‑detect LAN interfaces (very fast, no network needed)
+    LAN_INTERFACES=$(get_lan_interfaces)
+    LAN_IPS=$(get_lan_ips)
+    log "Detected binding IPs: $LAN_IPS"
+
+    NTPD_SERVICE=$(find_ntpd_service_name)
+
+    # Update /etc/hosts with markers (safe block)
+    $SED -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts 2>/dev/null || true
+    $CAT >> /etc/hosts <<EOF
+# BEGIN NTPD-RS HOSTS
+162.159.200.1    time.cloudflare.com
+94.198.159.15    ntppool1.time.nl
+3.134.129.152    ohio.time.system76.com
+85.163.168.227   time.cincura.net
+91.177.126.188   nts.teambelgium.net
+173.206.104.134  time.web-clock.ca
+18.228.202.30    brazil.time.system76.com
+# END NTPD-RS HOSTS
+EOF
+
+    # Regenerate ntp.toml
+    mkdir -p /etc/ntpd-rs
+    $CAT > "$NTPD_CONFIG" <<EOF
+# ntpd-rs NTS Configuration for Firewalla
+# Generated on $($DATE)
+
+[[source]]
+mode = "nts"
+address = "time.cloudflare.com"
+
+[[source]]
+mode = "nts"
+address = "ohio.time.system76.com"
+
+[[source]]
+mode = "nts"
+address = "ntppool1.time.nl"
+
+[[source]]
+mode = "nts"
+address = "brazil.time.system76.com"
+
+[[source]]
+mode = "nts"
+address = "time.cincura.net"
+
+[[source]]
+mode = "nts"
+address = "nts.teambelgium.net"
+
+[[source]]
+mode = "nts"
+address = "time.web-clock.ca"
+
+# Listen on all discovered LAN IPs
+$(for ip in $LAN_IPS; do
+echo "[[server]]"
+echo "listen = \"$ip:123\""
+echo ""
+done)
+
+# Observability socket for ntp-ctl (ntpd-rs >= 1.9.0)
+[observability]
+observation-path = "/run/ntpd-rs/observe"
+EOF
+    chmod 644 "$NTPD_CONFIG"
+
+    # Restart the daemon
+    $SYSTEMCTL restart "$NTPD_SERVICE"
+
+    log "Configuration updated and $NTPD_SERVICE restarted."
+    exit 0
+fi
+# ─────────────────── END FAST UPDATE ──────────────────────
+
 if [ $FROM_CRON -eq 0 ]; then
     log "Checking crontab..."
     remove_old_chrony_cron
@@ -377,8 +464,10 @@ log "Using systemd unit: ${NTPD_SERVICE}.service"
 # ─────────────────── CONFIGURATION (NTS ONLY) ──────────────────────
 log "Applying ntpd-rs NTS configuration..."
 
-$SED -i '/# Cloudflare/,$d' /etc/hosts 2>/dev/null || true
+# Remove old marker block and insert new one
+$SED -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts 2>/dev/null || true
 $CAT >> /etc/hosts <<EOF
+# BEGIN NTPD-RS HOSTS
 162.159.200.1    time.cloudflare.com
 94.198.159.15    ntppool1.time.nl
 3.134.129.152    ohio.time.system76.com
@@ -386,6 +475,7 @@ $CAT >> /etc/hosts <<EOF
 91.177.126.188   nts.teambelgium.net
 173.206.104.134  time.web-clock.ca
 18.228.202.30    brazil.time.system76.com
+# END NTPD-RS HOSTS
 EOF
 
 mkdir -p /etc/ntpd-rs
