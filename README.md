@@ -51,8 +51,12 @@ To avoid race conditions during early bootup, store the script in a persistent c
     cd /home/pi/.firewalla/config/scripts
     sudo wget https://raw.githubusercontent.com/upmcplanetracker/ntpd-rs-nts-for-firewalla/main/install_and_enforce_ntpd-rs.sh
     sudo chmod +x ./install_and_enforce_ntpd-rs.sh
+
+    sudo wget -O /etc/ntpd-rs.env https://raw.githubusercontent.com/upmcplanetracker/ntpd-rs-nts-for-firewalla/main/ntpd-rs.env
+
     sudo ./install_and_enforce_ntpd-rs.sh
-    
+
+The **`/etc/ntpd-rs.env`** file holds the editable NTS server list and observation socket path — see [Configuration](#configuration-etcntpd-rsenv) below. The script will refuse to run if this file is missing, so grab it **before** running the installer.
 
 The script will:
 
@@ -61,9 +65,39 @@ The script will:
 *   **Auto detect** the precise LAN IPs and configure them in `/etc/ntpd-rs/ntp.toml`.
 *   **Install** `ntpd-rs` using the official pre-built `.deb` binary.
 *   **Mask & Lock** competing NTP services (including `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`) via custom apt preferences to completely avoid package conflicts.
-*   **Append** NTS server IPs to `/etc/hosts` so ntpd-rs can resolve hostnames even when local DNS tracking is lagging during early boot phases.
+*   **Append** NTS server IPs to `/etc/hosts` (read from `/etc/ntpd-rs.env`) so ntpd-rs can resolve hostnames even when local DNS tracking is lagging during early boot phases.
 *   **Apply** iptables and ip6tables redirection rules to route NTP traffic cleanly on all active LAN interfaces.
-*   **Use** seven working (as of July 2026) NTS servers.
+*   **Use** seven working (as of July 2026) NTS servers, defined in `/etc/ntpd-rs.env`.
+
+* * *
+
+Configuration (`/etc/ntpd-rs.env`)
+-----------------------------------
+
+All editable settings — the NTS server list and the `ntp-ctl` observation socket path — live in **`/etc/ntpd-rs.env`**, not in the script itself. You never need to open `install_and_enforce_ntpd-rs.sh` to change servers.
+
+    NTPD_RS_NTS_SERVERS=(
+      "time.cloudflare.com:162.159.200.1"
+      "ntppool1.time.nl:94.198.159.15"
+      "ohio.time.system76.com:3.134.129.152"
+      "time.cincura.net:85.163.168.227"
+      "nts.teambelgium.net:91.177.126.188"
+      "time.web-clock.ca:173.206.104.134"
+      "brazil.time.system76.com:18.228.202.30"
+    )
+
+    NTPD_RS_OBSERVATION_PATH="/run/ntpd-rs/observe"
+
+*   Each server entry is `hostname:ip`. The hostname becomes the NTS source address in `ntp.toml`; the IP is pinned in `/etc/hosts` (see [Hosts File Fix](#hosts-file-fix)) so the handshake doesn't depend on local DNS being ready this early in boot.
+*   Add, remove, or edit entries as needed — at least one server is required, or the script exits with an error.
+*   `NTPD_RS_OBSERVATION_PATH` sets the `ntp-ctl` observation socket path (defaults to `/run/ntpd-rs/observe`; only change it if you have a specific reason to).
+*   Keep this file root-owned and non-world-writable (`chmod 644` or stricter, `root:root`) since it's sourced directly into a root-running script.
+
+After changing anything in `/etc/ntpd-rs.env`, apply it with:
+
+    sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config
+
+This regenerates the `/etc/hosts` pin block and `/etc/ntpd-rs/ntp.toml` from the file and restarts `ntpd-rs` — it does **not** touch cron, the boot-enforcement service, or the installed package, so it's safe to run as often as you like.
 
 * * *
 
@@ -273,11 +307,11 @@ This usually means ntpd-rs cannot resolve hostnames (DNS blocked) or cannot reac
 
 In the `ntp-ctl status` output, each source shows an **NTS cookies** line. `8/8 available` confirms active NTS. You can also grep the journal for `new source` messages. If you see `error while attempting key exchange`, that particular connection failed – but others likely still work.
 
-### Q: I changed the server list in the script, but the new servers don’t work.
+### Q: I changed the server list, but the new servers don’t work.
 
-*   Did you update both the `[[source]]` entries **and** the `/etc/hosts` block inside the script? Both must match.
-*   After editing, re‑run the script manually to regenerate configs.
-*   Use `--update-config` for a quick regeneration: `sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config`
+*   Did you edit `/etc/ntpd-rs.env` (not the script)? That's the only place the server list lives now — see [Configuration](#configuration-etcntpd-rsenv).
+*   Did you use the `hostname:ip` format for each entry?
+*   After editing, apply the change: `sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config`
 *   Verify the server actually supports NTS. Check the community list at [https://github.com/jauderho/nts-servers](https://github.com/jauderho/nts-servers).
 
 ### Q: The “NTP Intercept” slider in the Firewalla app shows OFF, but clients still can’t use their own NTP servers.
@@ -310,29 +344,29 @@ The script stops and masks `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`, and 
 
 ### Hosts File Fix
 
-Firewalla’s sandbox may block the unprivileged `ntp` user from accessing local DNS early in boot. To bypass this, the script inserts a marked block in `/etc/hosts`:
+Firewalla’s sandbox may block the unprivileged `ntp` user from accessing local DNS early in boot. To bypass this, the script inserts a marked block in `/etc/hosts`, generated from the server list in `/etc/ntpd-rs.env`:
 
     # BEGIN NTPD-RS HOSTS
     162.159.200.1    time.cloudflare.com
     94.198.159.15    ntppool1.time.nl
     3.134.129.152    ohio.time.system76.com
-    18.228.202.30    brazil.time.system76.com
     85.163.168.227   time.cincura.net
     91.177.126.188   nts.teambelgium.net
     173.206.104.134  time.web-clock.ca
+    18.228.202.30    brazil.time.system76.com
     # END NTPD-RS HOSTS
     
 
 ### Why 7 Servers?
 
-The NTP community often recommends at least **four to five** NTS servers for robust time keeping. However, many public NTS servers are run by individuals or small groups and can be less reliable than traditional NTP servers. After testing, we found **seven** servers that were consistently reachable and delivered correct time. We included all seven in the default configuration, but you are free to trim the list to five (or even fewer) by editing the script and running `--update-config`. The chosen servers are:
+The NTP community often recommends at least **four to five** NTS servers for robust time keeping. However, many public NTS servers are run by individuals or small groups and can be less reliable than traditional NTP servers. After testing, we found **seven** servers that were consistently reachable and delivered correct time. We included all seven in the default configuration, but you are free to trim the list to five (or even fewer) by editing `/etc/ntpd-rs.env` and running `--update-config`. The chosen servers are:
 
 *   **Cloudflare** – Global anycast, highly reliable.
 *   **TimeNL** – European government-backed stability.
 *   **System76** (Ohio & Brazil) – US and South American redundancy.
 *   **Cincura.net, TeamBelgium, Web‑Clock.ca** – Community‑maintained, geographically diverse.
 
-**Limitation:** If any of these IPs change (rare), you’ll need to update them in the script and re‑run it.
+**Limitation:** If any of these IPs change (rare), you’ll need to update them in `/etc/ntpd-rs.env` and re‑run with `--update-config`.
 
 ### Auto Detection of Interfaces & IPs
 
@@ -340,11 +374,11 @@ The script automatically discovers your LAN bridges and physical interfaces, ext
 
 ### Customizing Your Time Servers
 
-To add or remove servers, edit the script’s two configuration blocks (NTP sources + `/etc/hosts` block) and run:
+To add or remove servers, edit **`/etc/ntpd-rs.env`** (see [Configuration](#configuration-etcntpd-rsenv) above) — not the script — then run:
 
     sudo /home/pi/.firewalla/config/scripts/install_and_enforce_ntpd-rs.sh --update-config
 
-This regenerates the configuration and restarts ntpd-rs in seconds.
+This regenerates the `/etc/hosts` block and `ntp.toml` from `/etc/ntpd-rs.env` and restarts ntpd-rs in seconds. It does not re-download or reinstall the `ntpd-rs` package.
 
 ### Cron & Permissions
 
@@ -380,6 +414,7 @@ To remove ntpd-rs and restore Firewalla’s default time configuration, run the 
     sudo rm -f /etc/systemd/system/ntpd-rs-boot-enforce.service \
               /etc/ntpd-rs-url.conf \
               /etc/ntpd-rs-interface.conf \
+              /etc/ntpd-rs.env \
               /tmp/ntpd_rs_restart_counter \
               /tmp/ntpd_rs_last_health \
               /log/ntpd-rs-installer.log
@@ -400,6 +435,8 @@ To remove ntpd-rs and restore Firewalla’s default time configuration, run the 
     
 
 A full reboot is required to drop the iptables redirects and return time management entirely to Firewalla’s mobile app.
+
+Note: this removes `/etc/ntpd-rs.env` along with everything else. If you've customized your server list and might reinstall later, back that file up first: `sudo cp /etc/ntpd-rs.env ~/ntpd-rs.env.bak`.
 
 * * *
 
