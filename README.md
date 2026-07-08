@@ -59,7 +59,7 @@ The script will:
 *   **Auto-populate Cron:** Automatically checks, cleans, and adds its own execution entry (`0 4 * * * root ...`) to the system crontab (`/etc/crontab`). If the script path changes, running it manually updates the cron mapping automatically.
 *   **Auto discover** all your LAN interfaces (bridges and physical, excluding WAN structures like `wan`, `ppp`, `tun`, `wg`, `vpn`).
 *   **Auto detect** the precise subnets (CIDR) and add them to `/etc/ntpd-rs/ntp.toml` (e.g., `allow 192.168.1.0/24`).
-*   **Install** `ntpd-rs` if missing, using the official pre-built binary or a dedicated PPA that does not pull in system-breaking dependencies.
+*   **Install** `ntpd-rs` using the official Github pre-built `.deb` binary (currently 1.9.0).
 *   **Mask & Lock** competing NTP services (including `chrony`, `ntp`, `ntpdate`, `systemd-timesyncd`) via custom apt preferences to completely avoid package conflicts.
 *   **Append** NTS server IPs to `/etc/hosts` so ntpd-rs can resolve hostnames even when local DNS tracking is lagging during early boot phases.
 *   **Apply** iptables and ip6tables redirection rules to route NTP traffic cleanly on all active LAN interfaces.
