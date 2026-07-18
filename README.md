@@ -47,8 +47,8 @@ Installation
 
 To avoid race conditions during early bootup, store the script in a persistent configuration directory. Do not place it directly into `post_main.d`, as the script automatically sets up its own systemd service helper (`ntpd-rs-boot-enforce.service`) to handle execution safely during the boot cycle.
 
-    sudo mkdir -p /home/pi/.firewalla/config/scripts
-    cd /home/pi/.firewalla/config/scripts
+    sudo mkdir -p /home/pi/.firewalla/config/post_main.d 
+    cd /home/pi/.firewalla/config/post_main.d
     sudo wget https://raw.githubusercontent.com/upmcplanetracker/ntpd-rs-nts-for-firewalla/main/install_and_enforce_ntpd-rs.sh
     sudo chmod +x ./install_and_enforce_ntpd-rs.sh
 
@@ -60,7 +60,6 @@ The **`/etc/ntpd-rs.env`** file holds the editable NTS server list and observati
 
 The script will:
 
-*   **Auto-populate Cron:** Automatically checks, cleans, and adds its own execution entry (`0 4 * * * root ...`) to the system crontab (`/etc/crontab`). If the script path changes, running it manually updates the cron mapping automatically.
 *   **Auto discover** all your LAN interfaces (bridges and physical, excluding WAN structures like `wan`, `ppp`, `tun`, `wg`, `vpn`).
 *   **Auto detect** the precise LAN IPs and configure them in `/etc/ntpd-rs/ntp.toml`.
 *   **Install** `ntpd-rs` using the official pre-built `.deb` binary.
