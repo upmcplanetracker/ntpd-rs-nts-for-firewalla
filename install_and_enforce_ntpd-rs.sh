@@ -1,14 +1,27 @@
 #!/bin/bash
+set -euo pipefail
 
-if [ "$EUID" -ne 0 ]; then
+if [ "${EUID}" -ne 0 ]; then
   exec sudo "$0" "$@"
 fi
+
+# ─────────────────── TRAP / CLEANUP ──────────────────────
+cleanup() {
+    local exit_code=$?
+    rm -f "${DEB_FILE}.tmp.$$" 2>/dev/null || true
+    if [ ${exit_code} -ne 0 ]; then
+        log "Script exited with error code ${exit_code}."
+    fi
+}
+trap cleanup EXIT INT TERM
 
 SCRIPT_PATH="$(realpath "$0")"
 SCRIPT_NAME="$(basename "$SCRIPT_PATH")"
 URL_CONFIG="/etc/ntpd-rs-url.conf"
-SYSTEMD_BOOT_SERVICE="/etc/systemd/system/ntpd-rs-boot-enforce.service"
 ENV_FILE="/etc/ntpd-rs.env"
+
+# Firewalla post-main hook directory
+POST_MAIN_DIR="/home/pi/.firewalla/config/post_main.d"
 
 DEB_URL=""
 UPDATE_CONFIG=0
@@ -16,16 +29,23 @@ UPDATE_CONFIG=0
 for arg in "$@"; do
     case "$arg" in
         -h|--help)
-            echo "Usage: ${SCRIPT_NAME} [--update-config] <url-to-ntpd-rs-deb-package>"
-            echo "   or if URL is already saved: ${SCRIPT_NAME}"
+            echo "Usage: sudo ${SCRIPT_PATH} [--update-config] <url-to-ntpd-rs-deb-package>"
+            echo "   or if URL is already saved: sudo ${SCRIPT_PATH}"
             echo "   --update-config   Regenerate /etc/hosts and ntp.toml only, then restart service."
+            echo "   --rollback        Restore chrony as the NTP service (emergency recovery)."
             echo ""
             echo "NTS server list and observation socket path are read from ${ENV_FILE}."
             echo "Edit that file, then run --update-config to apply changes."
+            echo ""
+            echo "Place this script in ${POST_MAIN_DIR} for automatic enforcement"
+            echo "on boot and after network changes."
             exit 0
             ;;
         --update-config)
             UPDATE_CONFIG=1
+            ;;
+        --rollback)
+            rollback
             ;;
         *)
             if [ -z "$DEB_URL" ]; then DEB_URL="$arg"; fi
@@ -37,29 +57,24 @@ if [ -z "$DEB_URL" ] && [ "$UPDATE_CONFIG" -eq 0 ]; then
     if [ -f "$URL_CONFIG" ]; then
         DEB_URL=$(head -n1 "$URL_CONFIG")
     else
-        echo "Error: No package URL provided and $URL_CONFIG not found."
-        echo "Usage: ${SCRIPT_NAME} [--update-config] <url-to-ntpd-rs-deb-package>"
+        echo "Error: No package URL provided and $URL_CONFIG not found." >&2
+        echo "Usage: sudo ${SCRIPT_PATH} [--update-config] <url-to-ntpd-rs-deb-package>" >&2
         exit 1
     fi
 fi
 
-if [ "$UPDATE_CONFIG" -eq 0 ]; then
+if [ "$UPDATE_CONFIG" -eq 0 ] && [ -n "$DEB_URL" ]; then
     echo "$DEB_URL" > "$URL_CONFIG"
 fi
 
-CONFIG_FILE="/etc/ntpd-rs-interface.conf"  # written for debugging/external tooling; not read back by this script
-HEALTH_CHECK_INTERVAL=300           # 5 minutes
+CONFIG_FILE="/etc/ntpd-rs-interface.conf"
+HEALTH_CHECK_INTERVAL=300
 MAX_RESTARTS=3
-RESTART_COUNTER_FILE="/tmp/ntpd_rs_restart_counter"
-LAST_HEALTH_CHECK="/tmp/ntpd_rs_last_health"
-CRON_TAG="# NTPD-RS NTS Service"
-CRON_JOB="0 4 * * * root $SCRIPT_PATH &>/dev/null"
-CRON_FILE="/etc/crontab"
+RESTART_COUNTER_FILE="/var/lib/ntpd-rs/restart_counter"
+LAST_HEALTH_CHECK="/var/lib/ntpd-rs/last_health"
 DEB_FILE="/log/ntpd-rs_latest.deb"
 LOG_FILE="/log/ntpd-rs-installer.log"
 NTPD_CONFIG="/etc/ntpd-rs/ntp.toml"
-
-OLD_CHRONY_TAG="# Chrony NTS Service"
 
 APT_GET_WRAPPER="/home/pi/firewalla/scripts/apt-get.sh"
 SYSTEMCTL="/usr/bin/systemctl"
@@ -73,18 +88,16 @@ ECHO="/bin/echo"
 DATE="/bin/date"
 SLEEP="/bin/sleep"
 RM="/bin/rm"
-FUSER="/usr/bin/fuser"
 
 unalias -a 2>/dev/null || true
-mkdir -p /log
+mkdir -p /log /var/lib/ntpd-rs
 
-# Any launch without a controlling terminal (cron, systemd, etc.) is
-# treated as non-interactive. Interactive runs additionally do crontab/
-# boot-service (re)install, a settle sleep, and an internet-connectivity
-# check before proceeding.
-FROM_CRON=0
-if [ ! -t 0 ]; then
-    FROM_CRON=1
+# ─────────────────── DETECT INVOCATION CONTEXT ──────────────────────
+# post_main.d scripts run after Firewalla's main services come up.
+# Detect if we're being run from the hook directory.
+FROM_HOOK=0
+if [[ "$SCRIPT_PATH" == *"post_main.d"* ]]; then
+    FROM_HOOK=1
 fi
 
 log() {
@@ -92,14 +105,59 @@ log() {
     $ECHO "$msg" | tee -a "$LOG_FILE"
 }
 
-# ─────────────────── ENV FILE (editable NTS server list) ──────────────────────
+# ─────────────────── ROLLBACK ──────────────────────
+rollback() {
+    log "===== ROLLBACK MODE ====="
+    log "Restoring chrony as the active NTP service..."
+
+    local ntpd_svc
+    ntpd_svc=$(find_ntpd_service_name 2>/dev/null || echo "ntpd-rs")
+    $SYSTEMCTL stop "${ntpd_svc}.service" 2>/dev/null || true
+    $SYSTEMCTL disable "${ntpd_svc}.service" 2>/dev/null || true
+    $SYSTEMCTL mask "${ntpd_svc}.service" 2>/dev/null || true
+
+    # Remove iptables redirects
+    local interfaces
+    interfaces=$(get_lan_interfaces 2>/dev/null || true)
+    for iface in $interfaces; do
+        $IPTABLES -t nat -D PREROUTING -i "$iface" -p udp --dport 123 -j REDIRECT --to-port 123 2>/dev/null || true
+        $IP6TABLES -t nat -D PREROUTING -i "$iface" -p udp --dport 123 -j REDIRECT --to-port 123 2>/dev/null || true
+    done
+
+    # Unmask and enable chrony
+    $SYSTEMCTL unmask chrony.service 2>/dev/null || true
+    $SYSTEMCTL unmask chronyd.service 2>/dev/null || true
+    $SYSTEMCTL enable chrony.service 2>/dev/null || true
+    $SYSTEMCTL start chrony.service 2>/dev/null || true
+
+    # Remove hosts block
+    $SED -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts 2>/dev/null || true
+
+    log "Rollback complete. Chrony should now be active."
+    log "Run 'systemctl status chrony' to verify."
+    exit 0
+}
+
+# ─────────────────── ENV FILE ──────────────────────
 load_env() {
     if [ ! -f "$ENV_FILE" ]; then
-        log "ERROR: $ENV_FILE not found. This file defines the NTS server list"
-        log "and observation socket path. Restore it (see script's ntpd-rs.env"
-        log "template) before running this script."
+        log "ERROR: $ENV_FILE not found."
         echo "Error: $ENV_FILE not found." >&2
         exit 1
+    fi
+
+    local file_owner file_perms
+    file_owner=$(stat -c '%u' "$ENV_FILE" 2>/dev/null || echo "")
+    file_perms=$(stat -c '%a' "$ENV_FILE" 2>/dev/null || echo "")
+
+    if [ "$file_owner" != "0" ]; then
+        log "ERROR: $ENV_FILE is not owned by root. Refusing to source."
+        echo "Error: $ENV_FILE is not owned by root." >&2
+        exit 1
+    fi
+
+    if [ "$file_perms" != "600" ] && [ "$file_perms" != "644" ] && [ "$file_perms" != "640" ]; then
+        log "WARNING: $ENV_FILE has permissions $file_perms (expected 600, 640, or 644)."
     fi
 
     # shellcheck source=/etc/ntpd-rs.env
@@ -112,7 +170,7 @@ load_env() {
     fi
 
     if [ "${#NTPD_RS_NTS_SERVERS[@]}" -eq 0 ]; then
-        log "ERROR: NTPD_RS_NTS_SERVERS in $ENV_FILE is empty. Need at least one server."
+        log "ERROR: NTPD_RS_NTS_SERVERS in $ENV_FILE is empty."
         echo "Error: NTPD_RS_NTS_SERVERS in $ENV_FILE is empty." >&2
         exit 1
     fi
@@ -120,7 +178,7 @@ load_env() {
     for entry in "${NTPD_RS_NTS_SERVERS[@]}"; do
         if [[ "$entry" != *:* ]]; then
             log "ERROR: Malformed entry in NTPD_RS_NTS_SERVERS: '$entry' (expected hostname:ip)."
-            echo "Error: Malformed entry in NTPD_RS_NTS_SERVERS: '$entry' (expected hostname:ip)." >&2
+            echo "Error: Malformed entry: '$entry'" >&2
             exit 1
         fi
     done
@@ -128,7 +186,6 @@ load_env() {
     : "${NTPD_RS_OBSERVATION_PATH:=/run/ntpd-rs/observe}"
 }
 
-# Builds the /etc/hosts marker block from NTPD_RS_NTS_SERVERS.
 generate_hosts_block() {
     $ECHO "# BEGIN NTPD-RS HOSTS"
     for entry in "${NTPD_RS_NTS_SERVERS[@]}"; do
@@ -139,7 +196,6 @@ generate_hosts_block() {
     $ECHO "# END NTPD-RS HOSTS"
 }
 
-# Builds the [[source]] stanzas for ntp.toml from NTPD_RS_NTS_SERVERS.
 generate_ntp_sources() {
     for entry in "${NTPD_RS_NTS_SERVERS[@]}"; do
         local hostname="${entry%%:*}"
@@ -148,28 +204,6 @@ generate_ntp_sources() {
         $ECHO "address = \"${hostname}\""
         $ECHO ""
     done
-}
-
-manage_crontab() {
-    local action="$1"
-    case "$action" in
-        "check")  $GREP -q "$CRON_TAG" "$CRON_FILE" 2>/dev/null; return $? ;;
-        "update")
-            $SED -i "/$CRON_TAG/,+1d" "$CRON_FILE" 2>/dev/null || true
-            $ECHO "$CRON_TAG" >> "$CRON_FILE"
-            $ECHO "$CRON_JOB" >> "$CRON_FILE"
-            log "Updated crontab with daily enforcement job."
-            ;;
-        "show")   $GREP -A1 "$CRON_TAG" "$CRON_FILE" 2>/dev/null || $ECHO "No cron entry found" ;;
-    esac
-}
-
-remove_old_chrony_cron() {
-    if $GREP -q "$OLD_CHRONY_TAG" "$CRON_FILE" 2>/dev/null; then
-        log "Removing old chrony cron entry..."
-        $SED -i "/$OLD_CHRONY_TAG/,+1d" "$CRON_FILE" 2>/dev/null || true
-        log "Old chrony cron entry removed."
-    fi
 }
 
 get_lan_interfaces() {
@@ -186,19 +220,22 @@ get_lan_interfaces() {
             fi
         done
     fi
-    [ -z "$interfaces" ] && $ECHO "br0" && return
+    if [ -z "$interfaces" ]; then
+        log "ERROR: No LAN interfaces detected. Cannot configure ntpd-rs."
+        echo "Error: No LAN interfaces detected." >&2
+        exit 1
+    fi
     $ECHO "$interfaces" | tr ' ' '\n' | sort -u | tr '\n' ' '
 }
 
 get_lan_ips() {
-    # Output is via the pipeline's stdout (sort -u | tr), not this var —
-    # it exists only as a no-op placeholder from the original structure.
-    local ips=""
-    local interfaces=$(get_lan_interfaces)
+    local interfaces
+    interfaces=$(get_lan_interfaces)
     for iface in $interfaces; do
-        $IP -4 addr show "$iface" | $GREP 'inet ' | while read line; do
-            local cidr=$(echo "$line" | awk '{print $2}')
-            local ip=$(echo "$cidr" | cut -d'/' -f1)
+        $IP -4 addr show "$iface" | $GREP 'inet ' | while read -r line; do
+            local cidr ip
+            cidr=$(echo "$line" | awk '{print $2}')
+            ip=$(echo "$cidr" | cut -d'/' -f1)
             if [[ "$ip" =~ ^192\.168\. ]] || [[ "$ip" =~ ^10\. ]] || \
                [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[0-1])\. ]] || \
                [[ "$ip" =~ ^169\.254\. ]]; then
@@ -209,7 +246,8 @@ get_lan_ips() {
 }
 
 apply_iptables_rules() {
-    local interfaces=$(get_lan_interfaces)
+    local interfaces
+    interfaces=$(get_lan_interfaces)
     for iface in $interfaces; do
         $IPTABLES -t nat -D PREROUTING -i "$iface" -p udp --dport 123 -j REDIRECT --to-port 123 2>/dev/null || true
         $IP6TABLES -t nat -D PREROUTING -i "$iface" -p udp --dport 123 -j REDIRECT --to-port 123 2>/dev/null || true
@@ -229,17 +267,33 @@ is_ntpd_rs_healthy() {
     fi
 
     local stratum=""
+    local ntp_ctl_bin
+    ntp_ctl_bin=$(command -v ntp-ctl 2>/dev/null || true)
+
+    if [ -z "$ntp_ctl_bin" ]; then
+        ntp_ctl_bin=$(dpkg -L ntpd-rs 2>/dev/null | $GREP 'bin/ntp-ctl$' | head -n1 || true)
+    fi
+
+    if [ -z "$ntp_ctl_bin" ] || [ ! -x "$ntp_ctl_bin" ]; then
+        log "WARNING: ntp-ctl not found. Skipping stratum health check."
+        return 0
+    fi
+
+    local config_flag="-c"
+    if "$ntp_ctl_bin" --help 2>&1 | $GREP -q -- '--config'; then
+        config_flag="--config"
+    fi
 
     if command -v jq &>/dev/null; then
         local status_json
-        status_json=$(ntp-ctl -c "$NTPD_CONFIG" -j status 2>/dev/null || true)
+        status_json=$("$ntp_ctl_bin" "$config_flag" "$NTPD_CONFIG" -j status 2>/dev/null || true)
         if [ -n "$status_json" ]; then
             stratum=$(echo "$status_json" | jq -r '.stratum // empty' 2>/dev/null)
         fi
     fi
 
     if [ -z "$stratum" ]; then
-        stratum=$(ntp-ctl -c "$NTPD_CONFIG" status 2>/dev/null | awk '/Stratum:/{print $2}')
+        stratum=$("$ntp_ctl_bin" "$config_flag" "$NTPD_CONFIG" status 2>/dev/null | awk '/Stratum:/{print $2}')
     fi
 
     if [ -n "$stratum" ] && [ "$stratum" -lt 16 ] 2>/dev/null; then
@@ -251,8 +305,9 @@ is_ntpd_rs_healthy() {
 
 should_check_health() {
     [ ! -f "$LAST_HEALTH_CHECK" ] && return 0
-    local last_check=$($CAT "$LAST_HEALTH_CHECK")
-    local current_time=$($DATE +%s)
+    local last_check current_time
+    last_check=$($CAT "$LAST_HEALTH_CHECK")
+    current_time=$($DATE +%s)
     [ $((current_time - last_check)) -ge $HEALTH_CHECK_INTERVAL ]
 }
 
@@ -273,20 +328,21 @@ manage_restart_counter() {
 
 neutralize_and_purge_conflicts() {
     log "Neutralizing competing NTP services..."
-    $CAT > /etc/apt/preferences.d/block-ntp <<EOF
+    $CAT > /etc/apt/preferences.d/block-ntp <<'EOF'
 Package: ntp ntpdate systemd-timesyncd chrony ntpsec
 Pin: origin *
 Pin-Priority: -1
 EOF
 
     for svc in ntp ntpdate systemd-timesyncd ntp-systemd-netif chrony chronyd ntpsec; do
-        $SYSTEMCTL stop "$svc.service" 2>/dev/null || true
-        $SYSTEMCTL disable "$svc.service" 2>/dev/null || true
-        $SYSTEMCTL mask "$svc.service" 2>/dev/null || true
+        $SYSTEMCTL stop "${svc}.service" 2>/dev/null || true
+        $SYSTEMCTL disable "${svc}.service" 2>/dev/null || true
+        $SYSTEMCTL mask "${svc}.service" 2>/dev/null || true
     done
 
-    CONFLICTING_DAEMONS=("chrony" "ntpsec" "ntp" "ntpdate")
+    local CONFLICTING_DAEMONS=("chrony" "ntpsec" "ntp" "ntpdate")
     for daemon in "${CONFLICTING_DAEMONS[@]}"; do
+        local STATE
         STATE=$(dpkg-query -W -f='${Status}' "$daemon" 2>/dev/null || echo "")
         if [[ "$STATE" == "install ok installed" ]] || [[ "$STATE" == *"config-files"* ]] || [[ "$STATE" == *"deinstall"* ]]; then
             log "Purging $daemon..."
@@ -296,56 +352,57 @@ EOF
 }
 
 find_ntpd_service_name() {
-    if $SYSTEMCTL list-unit-files | $GREP -q "^ntpd-rsd.service"; then
+    if $SYSTEMCTL cat ntpd-rsd.service &>/dev/null; then
         echo "ntpd-rsd"
-    elif $SYSTEMCTL list-unit-files | $GREP -q "^ntpd-rs.service"; then
+    elif $SYSTEMCTL cat ntpd-rs.service &>/dev/null; then
         echo "ntpd-rs"
     else
         echo "ntpd-rs"
     fi
 }
 
-install_boot_service() {
-    log "Installing boot-time enforcement service..."
-    $CAT > "$SYSTEMD_BOOT_SERVICE" <<EOF
-[Unit]
-Description=Re-apply ntpd-rs NTP rules and start daemon
-Wants=network-online.target
-After=network-online.target
+# ─────────────────── DOWNLOAD HELPER ──────────────────────
+download_file() {
+    local url="$1" dest="$2"
+    if command -v wget &>/dev/null; then
+        wget -q -O "$dest" "$url"
+    elif command -v curl &>/dev/null; then
+        curl -fsSL -o "$dest" "$url"
+    else
+        log "ERROR: Neither wget nor curl is available."
+        echo "Error: Neither wget nor curl is available." >&2
+        exit 1
+    fi
+}
 
-[Service]
-Type=oneshot
-ExecStart=$SCRIPT_PATH
-RemainAfterExit=yes
-
-[Install]
-WantedBy=multi-user.target
-EOF
-    $SYSTEMCTL daemon-reload
-    $SYSTEMCTL enable ntpd-rs-boot-enforce.service 2>/dev/null || true
-    log "Boot-time enforcement service enabled."
+# ─────────────────── URL VALIDATION ──────────────────────
+validate_url() {
+    local url="$1"
+    if [[ ! "$url" =~ ^https?:// ]]; then
+        log "ERROR: URL must start with http:// or https://"
+        echo "Error: Invalid URL scheme." >&2
+        exit 1
+    fi
 }
 
 log "===== NTPD-RS enforcement script started ====="
+log "Invocation: SCRIPT_PATH=${SCRIPT_PATH}, FROM_HOOK=${FROM_HOOK}"
 
 load_env
 
-# ─────────────────── FAST UPDATE MODE (--update-config) ──────────────────────
+# ─────────────────── FAST UPDATE MODE ──────────────────────
 if [ "$UPDATE_CONFIG" -eq 1 ]; then
-    log "Update‑config mode: regenerating /etc/hosts and ntp.toml, then restarting service."
+    log "Update-config mode: regenerating /etc/hosts and ntp.toml, then restarting service."
 
-    # Re‑detect LAN interfaces (very fast, no network needed)
     LAN_INTERFACES=$(get_lan_interfaces)
     LAN_IPS=$(get_lan_ips)
     log "Detected binding IPs: $LAN_IPS"
 
     NTPD_SERVICE=$(find_ntpd_service_name)
 
-    # Update /etc/hosts with markers (safe block)
     $SED -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts 2>/dev/null || true
     generate_hosts_block >> /etc/hosts
 
-    # Regenerate ntp.toml
     mkdir -p /etc/ntpd-rs
     {
         $ECHO "# ntpd-rs NTS Configuration for Firewalla"
@@ -364,30 +421,15 @@ if [ "$UPDATE_CONFIG" -eq 1 ]; then
     } > "$NTPD_CONFIG"
     chmod 644 "$NTPD_CONFIG"
 
-    # Restart the daemon
+    mkdir -p /run/ntpd-rs
+
     $SYSTEMCTL restart "$NTPD_SERVICE"
 
     log "Configuration updated and $NTPD_SERVICE restarted."
     exit 0
 fi
-# ─────────────────── END FAST UPDATE ──────────────────────
 
-if [ $FROM_CRON -eq 0 ]; then
-    log "Checking crontab..."
-    remove_old_chrony_cron
-    if manage_crontab "check"; then
-        if ! $GREP -A1 "$CRON_TAG" "$CRON_FILE" | $GREP -q "$SCRIPT_PATH"; then
-            log "Updating cron entry (path changed)..."
-            manage_crontab "update"
-        else
-            log "Cron entry OK."
-        fi
-    else
-        log "Adding cron entry..."
-        manage_crontab "update"
-    fi
-    install_boot_service
-fi
+# ─────────────────── NORMAL MODE ──────────────────────
 
 log "Discovering LAN interfaces..."
 LAN_INTERFACES=$(get_lan_interfaces)
@@ -402,9 +444,11 @@ SCRIPT_PATH="$SCRIPT_PATH"
 URL="$DEB_URL"
 EOF
 
-if [ $FROM_CRON -eq 0 ]; then
-    log "Waiting 30s for system settle..."
-    $SLEEP 30
+# When running from the hook, network is already up — no need to wait.
+# When running interactively, still wait briefly.
+if [ "$FROM_HOOK" -eq 0 ]; then
+    log "Waiting 10s for system settle (interactive mode)..."
+    $SLEEP 10
 fi
 
 NTPD_SERVICE=$(find_ntpd_service_name)
@@ -418,6 +462,7 @@ if $SYSTEMCTL is-active --quiet "$NTPD_SERVICE" && \
         $ECHO "$($DATE +%s)" > "$LAST_HEALTH_CHECK"
         if ! is_ntpd_rs_healthy; then
             log "WARNING: $NTPD_SERVICE unhealthy – restarting once..."
+            mkdir -p /run/ntpd-rs
             $SYSTEMCTL restart "$NTPD_SERVICE"
             $SLEEP 10
             if is_ntpd_rs_healthy; then
@@ -425,9 +470,12 @@ if $SYSTEMCTL is-active --quiet "$NTPD_SERVICE" && \
                 manage_restart_counter "reset"
             else
                 log "ERROR: $NTPD_SERVICE still unhealthy."
+                local rc
                 rc=$(manage_restart_counter "get")
                 if [ "$rc" -ge "$MAX_RESTARTS" ]; then
                     log "CRITICAL: $NTPD_SERVICE repeatedly failing – manual intervention needed."
+                else
+                    manage_restart_counter "increment"
                 fi
             fi
         else
@@ -438,10 +486,12 @@ if $SYSTEMCTL is-active --quiet "$NTPD_SERVICE" && \
     exit 0
 fi
 
-if [ $FROM_CRON -eq 0 ]; then
+# Internet check: skip when running from hook (network is already up),
+# but keep it for interactive first-time installs
+if [ "$FROM_HOOK" -eq 0 ]; then
     log "Checking internet connectivity..."
     INTERNET_UP=0
-    for i in {1..30}; do
+    for i in $(seq 1 30); do
         if ping -c 1 -W 2 8.8.8.8 &>/dev/null; then
             log "Internet is UP."
             INTERNET_UP=1
@@ -450,7 +500,7 @@ if [ $FROM_CRON -eq 0 ]; then
         log "Still waiting... ($i/30)"
         $SLEEP 2
     done
-    if [ $INTERNET_UP -eq 0 ]; then
+    if [ "$INTERNET_UP" -eq 0 ]; then
         log "ERROR: No internet—cannot download package. Exiting."
         exit 1
     fi
@@ -458,31 +508,26 @@ fi
 
 neutralize_and_purge_conflicts
 
+validate_url "$DEB_URL"
+
 log "Downloading ntpd-rs from: ${DEB_URL}"
-if ! wget -q -O "$DEB_FILE" "$DEB_URL"; then
+TMP_DEB="${DEB_FILE}.tmp.$$"
+if ! download_file "$DEB_URL" "$TMP_DEB"; then
     log "Error: Download failed."
+    rm -f "$TMP_DEB"
     exit 1
 fi
+mv "$TMP_DEB" "$DEB_FILE"
 
 log "Installing/upgrading ntpd-rs using Firewalla Wrapper..."
-lock_wait=0
-while $FUSER /var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock &>/dev/null; do
-    if [ $lock_wait -ge 120 ]; then
-        log "ERROR: Apt locked >2 min – exiting."
-        exit 1
-    fi
-    log "Apt busy – waiting 5s ($lock_wait/120s)"
-    $SLEEP 5
-    lock_wait=$((lock_wait + 5))
-done
 
-for attempt in {1..3}; do
+for attempt in $(seq 1 3); do
     log "Install attempt $attempt/3..."
-    if $APT_GET_WRAPPER install "$DEB_FILE"; then
+    if $APT_GET_WRAPPER -o DPkg::Lock::Timeout=120 install "$DEB_FILE"; then
         log "ntpd-rs package installed."
         break
     fi
-    if [ $attempt -lt 3 ]; then
+    if [ "$attempt" -lt 3 ]; then
         log "Retrying in 10s..."
         $SLEEP 10
     else
@@ -494,10 +539,9 @@ done
 NTPD_SERVICE=$(find_ntpd_service_name)
 log "Using systemd unit: ${NTPD_SERVICE}.service"
 
-# ─────────────────── CONFIGURATION (NTS ONLY) ──────────────────────
+# ─────────────────── CONFIGURATION ──────────────────────
 log "Applying ntpd-rs NTS configuration..."
 
-# Remove old marker block and insert new one
 $SED -i '/# BEGIN NTPD-RS HOSTS/,/# END NTPD-RS HOSTS/d' /etc/hosts 2>/dev/null || true
 generate_hosts_block >> /etc/hosts
 
@@ -519,14 +563,16 @@ mkdir -p /etc/ntpd-rs
 } > "$NTPD_CONFIG"
 chmod 644 "$NTPD_CONFIG"
 
-# Ensure socket directory exists (tmpfs, so create at runtime)
 mkdir -p /run/ntpd-rs
 
-# Unit overrides
+# Unit overrides with RuntimeDirectory
 mkdir -p /etc/systemd/system/${NTPD_SERVICE}.service.d
 $CAT > /etc/systemd/system/${NTPD_SERVICE}.service.d/override.conf <<EOF
 [Unit]
 Conflicts=chrony.service chronyd.service ntp.service ntpsec.service systemd-timesyncd.service
+
+[Service]
+RuntimeDirectory=ntpd-rs
 EOF
 
 log "Starting $NTPD_SERVICE..."
@@ -549,8 +595,11 @@ else
 fi
 
 log "=== Status ==="
-if command -v ntp-ctl &>/dev/null; then
-    ntp-ctl -c "$NTPD_CONFIG" status || log "Unable to fetch status"
+NTP_CTL_BIN=$(command -v ntp-ctl 2>/dev/null || dpkg -L ntpd-rs 2>/dev/null | $GREP 'bin/ntp-ctl$' | head -n1 || true)
+if [ -n "$NTP_CTL_BIN" ] && [ -x "$NTP_CTL_BIN" ]; then
+    CONFIG_FLAG="-c"
+    "$NTP_CTL_BIN" --help 2>&1 | $GREP -q -- '--config' && CONFIG_FLAG="--config"
+    "$NTP_CTL_BIN" "$CONFIG_FLAG" "$NTPD_CONFIG" status || log "Unable to fetch status"
 else
     log "ntp-ctl not available"
 fi
